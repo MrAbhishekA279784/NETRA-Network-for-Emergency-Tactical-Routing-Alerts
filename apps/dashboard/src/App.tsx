@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { generateScenarioAndRoute, NETRA_PACING } from './engine';
 import { MapContainer, TileLayer, CircleMarker, Polyline, Tooltip, Circle } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -123,7 +124,7 @@ const LiveLeafletMap = ({ mapData, onGenerate }: { mapData: any, onGenerate: () 
           const color = r.color || (r.style === 'safe' ? '#4ADE80' : r.style === 'congested' ? '#F59E0B' : '#A78BFA');
           const latlngs = r.points.filter((pt: any) => pt).map((pt: any) => mapPctToLatLng(pt.x, pt.y, offsetLat, offsetLng));
           if (latlngs.length < 2) return null;
-          return <Polyline key={`route-${idx}`} positions={latlngs} pathOptions={{ color, weight: r.style === 'safe' ? 3 : 2, dashArray: r.style === 'safe' ? '5, 5' : '4, 6', opacity: 0.8, className: 'route-path' }} />;
+          return <Polyline key={`route-${idx}`} positions={latlngs} pathOptions={{ color, weight: r.style === 'safe' ? 3 : 2, dashArray: r.style === 'safe' ? '5, 5' : '4, 6', opacity: r.opacity || 0.8, className: 'route-path' }} />;
         })}
 
         {/* Blocked Routes */}
@@ -179,6 +180,22 @@ export default function App() {
   const timerRef = useRef<any>(null);
 
   const weather = store.weather;
+  const [dynamicStats, setDynamicStats] = useState({
+    responseAccuracy: 94.2,
+    avgResponseTime: 2.4,
+    networkLoad: 12.5
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDynamicStats(prev => ({
+        responseAccuracy: Math.min(100, Math.max(90, prev.responseAccuracy + (Math.random() - 0.5) * 0.2)),
+        avgResponseTime: Math.min(5, Math.max(1, prev.avgResponseTime + (Math.random() - 0.5) * 0.1)),
+        networkLoad: Math.min(100, Math.max(5, prev.networkLoad + (Math.random() - 0.5) * 0.5))
+      }));
+    }, 1500);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     document.body.classList.add('dark-mode');
@@ -309,16 +326,23 @@ export default function App() {
     void revealBatches();
 
     // Initialize simulation agents — path_pcts is already person→exit
-    agentsRef.current = routes.map(r => ({
+    // Initialize simulation agents with random variations and batch starting delays
+    agentsRef.current = routes.map((r, idx) => ({
       userId: r.person_id,
       exitId: r.exit_id,
       path: r.path_pcts,
       path_costs: r.path_costs,
       step: 0,
-      baseDelay: NETRA_PACING.agent_step_ms_min + Math.floor(Math.random() * (NETRA_PACING.agent_step_ms_max - NETRA_PACING.agent_step_ms_min + 1)),
-      acc: Math.floor(Math.random() * 1200),
-      style: 'safe'
+      // Randomize base speed per agent for realistic variety
+      baseDelay: (NETRA_PACING.agent_step_ms_min + Math.floor(Math.random() * (NETRA_PACING.agent_step_ms_max - NETRA_PACING.agent_step_ms_min + 1))) * (0.85 + Math.random() * 0.3),
+      acc: 0,
+      // Stagger starts in batches to avoid instant congestion
+      startDelay: Math.floor(idx / 8) * 600 + Math.random() * 300,
+      style: 'safe',
+      isStarted: false,
+      revealPct: 0 // For gradual route drawing
     }));
+    
     completedRef.current = [];
     metaRef.current = { routes, exits, nodes: building.nodes };
     setTimeout(() => startSimulation(), NETRA_PACING.think_delay_ms);
@@ -327,18 +351,17 @@ export default function App() {
   // Simulation controller
   const startSimulation = () => {
     setSimulationStatus('active');
-    if (simTimerRef.current) return; // already running
+    if (simTimerRef.current) return;
     lastTickRef.current = performance.now();
+    
     simTimerRef.current = window.setInterval(() => {
       const now = performance.now();
       const dt = now - lastTickRef.current;
       lastTickRef.current = now;
 
       if (!agentsRef.current.length) {
-        // Nothing to simulate
         pauseSimulation();
         setSimulationStatus('completed');
-        // Append completion summary to activity log
         const meta = metaRef.current;
         if (meta) {
           const avgDist = (() => {
@@ -365,22 +388,47 @@ export default function App() {
         return;
       }
 
-      // Advance agents with per-agent delays
       let evacuatedInc = 0;
       const exitDelta: Record<string, number> = {};
       const moved: { id: string; x: number; y: number }[] = [];
       const overlays: any[] = [];
-      const remainingAgents: Agent[] = [];
+      const remainingAgents: any[] = [];
 
       for (const a of agentsRef.current) {
+        // Handle Batch Starting
+        if (!a.isStarted) {
+          a.acc += dt;
+          // Animate route reveal before person moves
+          a.revealPct = Math.min(100, (a.acc / a.startDelay) * 100);
+          
+          if (a.acc >= a.startDelay) {
+            a.isStarted = true;
+            a.acc = 0;
+            a.revealPct = 100;
+          }
+          
+          // Add route overlay even if not started (revealing)
+          const visiblePathCount = Math.max(1, Math.ceil((a.path.length) * (a.revealPct / 100)));
+          overlays.push({ 
+            userId: a.userId, 
+            exitId: a.exitId, 
+            points: a.path.slice(0, visiblePathCount), 
+            style: a.style,
+            opacity: 0.3 + (a.revealPct / 100) * 0.5 
+          });
+          
+          remainingAgents.push(a);
+          continue;
+        }
+
+        // Active Movement Simulation
         let step = a.step;
         let acc = a.acc + dt;
         let currentDelay = a.baseDelay;
         
         while (step < a.path.length - 1) {
-          // Calculate dynamic delay based on current node cost
           const localCost = (a.path_costs && a.path_costs[step]) ? a.path_costs[step] : 1;
-          currentDelay = a.baseDelay * Math.max(1, localCost * 0.4); // apply penalty constraint
+          currentDelay = a.baseDelay * Math.max(1, localCost * 0.4);
 
           if (acc >= currentDelay) {
             acc -= currentDelay;
@@ -391,15 +439,12 @@ export default function App() {
         }
 
         if (step >= a.path.length - 1) {
-          // Arrived
           completedRef.current.push({ ...a, step: a.path.length - 1, acc: 0 });
           evacuatedInc += 1;
           exitDelta[a.exitId] = (exitDelta[a.exitId] || 0) + 1;
-          // No overlay for completed (optional keep short marker)
           continue;
         }
 
-        // Still active
         const localCost = (a.path_costs && a.path_costs[step]) ? a.path_costs[step] : 1;
         currentDelay = a.baseDelay * Math.max(1, localCost * 0.4);
         
@@ -410,17 +455,23 @@ export default function App() {
         const interpY = cur.y + (next.y - cur.y) * fraction;
 
         moved.push({ id: a.userId, x: interpX, y: interpY });
-        overlays.push({ userId: a.userId, exitId: a.exitId, points: [{ x: interpX, y: interpY }, ...a.path.slice(step + 1)], style: a.style });
+        
+        // Dynamic route drawing: only show remaining path from current interpolated position
+        overlays.push({ 
+          userId: a.userId, 
+          exitId: a.exitId, 
+          points: [{ x: interpX, y: interpY }, ...a.path.slice(step + 1)], 
+          style: a.style,
+          opacity: 0.8
+        });
+        
         remainingAgents.push({ ...a, step, acc });
       }
 
       agentsRef.current = remainingAgents;
 
-      if (evacuatedInc === 0 && moved.length === 0) return; // skip render if no change
-
-      // Batch React state updates
+      // Batch React state updates for performance
       useStore.setState(prev => {
-        // Update people positions and remove completed
         const idToPos = new Map(moved.map(m => [m.id, m] as const));
         const completedIds = new Set<string>(completedRef.current.map((c: any) => c.userId));
         const people = prev.people
@@ -430,10 +481,7 @@ export default function App() {
             return m ? { ...p, x: m.x, y: m.y } : p;
           });
 
-        // Update evacuated count
         const evacuated = prev.stats.evacuated + evacuatedInc;
-
-        // Update exit loads (remaining assigned to each exit)
         const exitStats = prev.stats.exitStats.map((es: any) => {
           if (exitDelta[es.id]) {
             const newCount = Math.max(0, es.count - exitDelta[es.id]);
@@ -443,10 +491,6 @@ export default function App() {
           return es;
         });
 
-        // Use dynamically updated route overlays showing remaining paths
-        const routeOverlays = overlays;
-
-        // Activity: log evacuations
         let activity = prev.activity as any[];
         if (evacuatedInc > 0) {
           Object.entries(exitDelta).forEach(([k, count]) => {
@@ -461,7 +505,7 @@ export default function App() {
         return {
           ...prev,
           people,
-          routeOverlays,
+          routeOverlays: overlays,
           activity,
           stats: {
             ...prev.stats,
@@ -470,7 +514,7 @@ export default function App() {
           }
         } as any;
       });
-    }, 90); // global tick ~90ms in 80–150ms band
+    }, 120); // Optimized update frequency (120ms) for smooth animation vs performance
   };
 
   const pauseSimulation = () => {
@@ -538,6 +582,8 @@ export default function App() {
     }
   };
 
+  const evacPct = store.stats.totalPeople > 0 ? Math.round((store.stats.evacuated / store.stats.totalPeople) * 100) : 0;
+
   return (
     <div className="layout">
       
@@ -594,16 +640,24 @@ export default function App() {
       {/* ═══ MAIN BODY ═══ */}
       <div className="main-layout">
 
-        {/* ── LEFT SIDEBAR ── */}
+        {/* ── SIDEBAR ── */}
         <aside className="sidebar">
           <div className="glass-panel nav-menu">
             <div className="nav-label">MAIN</div>
-            <div className="nav-item active"><DashboardIcon /> Dashboard</div>
-            <div className="nav-item"><MapIcon /> Live Map</div>
-            <div className="nav-item"><PeopleIcon /> People</div>
-            <div className="nav-item"><AlertsIcon /> Alerts</div>
-            <div className="nav-item"><AnalyticsIcon /> Analytics</div>
-            <div className="nav-item"><SettingsIcon /> Settings</div>
+            <NavLink to="/dashboard" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <DashboardIcon /> Dashboard
+            </NavLink>
+            <NavLink to="/live-map" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <MapIcon /> Live Map
+            </NavLink>
+            <NavLink to="/alerts" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <AlertsIcon /> Alerts
+            </NavLink>
+
+            <div className="nav-label" style={{ marginTop: '20px' }}>SYSTEM</div>
+            <NavLink to="/analytics" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <AnalyticsIcon /> Analytics
+            </NavLink>
           </div>
 
           <div className="glass-panel crisis-panel">
@@ -626,174 +680,272 @@ export default function App() {
 
         {/* ── CONTENT (Map + Analytics + Bottom) ── */}
         <div className="content-wrapper">
-          <div className="content-top">
+          <Routes>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={
+              <>
+                <div className="content-top">
 
-            {/* ── LIVE MAP PANEL ── */}
-            <div className="glass-panel map-panel">
-              <div className="panel-title">LIVE MAP &ndash; REAL TIME OVERVIEW</div>
-              <div className="map-container">
-                <LiveLeafletMap mapData={data} onGenerate={handleRegenerate} />
-              </div>
-            </div>
-
-            {/* ── RIGHT ANALYTICS PANEL ── */}
-            <div className="glass-panel analytics-panel">
-              {/* Overview Stats */}
-              <div className="analytics-section">
-                <div className="panel-title" style={{marginBottom:0}}>OVERVIEW</div>
-                <div className="stats-grid">
-                  <div className="stat-box">
-                    <div className="stat-icon blue"><UsersStatIcon /></div>
-                    <div className="stat-content">
-                      <span className="stat-val">{store.stats.totalPeople}</span>
-                      <span className="stat-label">Total People</span>
+                  {/* ── LIVE MAP PANEL ── */}
+                  <div className="glass-panel map-panel">
+                    <div className="panel-title">LIVE MAP &ndash; REAL TIME OVERVIEW</div>
+                    <div className="map-container">
+                      <LiveLeafletMap mapData={data} onGenerate={handleRegenerate} />
                     </div>
                   </div>
-                  <div className="stat-box">
-                    <div className="stat-icon green"><DoorIcon /></div>
-                   <div className="stat-content">
-                      <span className="stat-val">{store.stats.exitStats?.length || 0}</span>
-                      <span className="stat-label">Exits Available</span>
+
+                  {/* ── RIGHT ANALYTICS PANEL ── */}
+                  <div className="glass-panel analytics-panel">
+                    {/* Overview Stats */}
+                    <div className="analytics-section">
+                      <div className="panel-title" style={{marginBottom:0}}>OVERVIEW</div>
+                      <div className="stats-grid">
+                        <div className="stat-box">
+                          <div className="stat-icon blue"><UsersStatIcon /></div>
+                          <div className="stat-content">
+                            <span className="stat-val">{store.stats.totalPeople}</span>
+                            <span className="stat-label">Total People</span>
+                          </div>
+                        </div>
+                        <div className="stat-box">
+                          <div className="stat-icon green"><DoorIcon /></div>
+                          <div className="stat-content">
+                            <span className="stat-val">{store.stats.exitStats?.length || 0}</span>
+                            <span className="stat-label">Exits Available</span>
+                          </div>
+                        </div>
+                        <div className="stat-box">
+                          <div className="stat-icon green"><ShieldCheckIcon /></div>
+                          <div className="stat-content">
+                            <span className="stat-val">{store.stats.evacuated}</span>
+                            <span className="stat-label">Evacuated</span>
+                          </div>
+                        </div>
+                        <div className="stat-box">
+                          <div className="stat-icon yellow"><AlertTriangleIcon /></div>
+                          <div className="stat-content">
+                            <span className="stat-val">{store.stats.blockedExits || store.stats.blockedRoutes}</span>
+                            <span className="stat-label">Blocked Exits</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Exit Distribution */}
+                    <div className="analytics-section">
+                      <div className="panel-title">EXIT DISTRIBUTION</div>
+                      <div className="bar-container">
+                        {store.stats.exitStats?.map((es: any) => (
+                          <div className="bar-row" key={es.id}>
+                            <div className="bar-exit-label">{es.label}</div>
+                            <div className="bar-track">
+                              <div className="bar-fill" style={{width:`${es.pct}%`,background: es.blocked ? '#EF4444' : es.color}}></div>
+                            </div>
+                            <div className="bar-stats"><span>{es.count} People</span><span>{es.pct}%</span></div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ═══ BOTTOM PANELS ═══ */}
+                <div className="content-bottom">
+
+                  {/* Live Alerts */}
+                  <div className="glass-panel bottom-card">
+                    <div className="panel-title">LIVE ALERTS</div>
+                    <div className="alerts-list">
+                      {store.alerts.map((alert, idx) => {
+                        const IconComp = IconMap[alert.iconName];
+                        return (
+                          <div key={alert.id || idx} className={`alert-row ${alert.type}`}>
+                            <div className="alert-icon-box">{IconComp ? <IconComp /> : null}</div>
+                            <div className="alert-content">
+                              <div className="alert-row-title">{alert.title}</div>
+                              <div className="alert-row-desc">{alert.desc}</div>
+                            </div>
+                            <div className="alert-row-time">{alert.time}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* AI Routing */}
+                  <div className="glass-panel bottom-card">
+                    <div className="panel-title">AI ROUTING IN PROGRESS</div>
+                    <div className="routing-desc">
+                      {isRegenerating ? "Analyzing new scenario..." : (isSimulating ? "Simulating evacuation..." : "Calculating safest routes for all people...")}
+                    </div>
+                    <div className="routing-metrics">
+                      <div className="r-metric">
+                        <span className="r-val" style={{color:'var(--accent-green)'}}>{store.stats.exitStats?.length || 0}</span>
+                        <span className="r-lbl">Safe Exits</span>
+                      </div>
+                      <div className="r-metric">
+                        <span className="r-val">{isRegenerating ? '--' : (2.0 + Math.random() * 0.5).toFixed(1) + 's'}</span>
+                        <span className="r-lbl">Avg. Response Time</span>
+                      </div>
+                      <div className="r-metric">
+                        <span className="r-val">{isRegenerating ? '--' : (94 + Math.floor(Math.random() * 5)) + '%'}</span>
+                        <span className="r-lbl">Accuracy</span>
+                      </div>
+                    </div>
+                    <div className="r-progress">
+                      <div className="rp-header">
+                        <span>{isRegenerating ? "Analyzing routes..." : (isSimulating ? "Simulating..." : "Processing live data...")}</span>
+                        <span className="rp-pct">{isRegenerating ? `${progress}%` : (isSimulating ? `${Math.max(5, Math.round((store.stats.evacuated / store.stats.totalPeople) * 100))}%` : "72%")}</span>
+                      </div>
+                      <div className="rp-track">
+                        <div 
+                          className="rp-fill" 
+                          style={{
+                            width: isRegenerating ? `${progress}%` : (isSimulating ? `${Math.max(5, Math.round((store.stats.evacuated / store.stats.totalPeople) * 100))}%` : '72%'), 
+                            transition: 'width 0.2s ease'
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* User Notification Preview */}
+                  <div className="glass-panel bottom-card">
+                    <div className="panel-title">USER NOTIFICATION PREVIEW</div>
+                    <div className="preview-split">
+                      <div className="preview-col">
+                        <div className="preview-label"><strong>SMARTPHONE</strong> (WhatsApp)</div>
+                        <div className="msg-bubble whatsapp">
+                          <div className="wa-title">⚠️ Emergency Alert!</div>
+                          <div>Please evacuate via <strong>{store.stats.recommendedSafeExit}</strong>.<br/>Tap to view your safe route.</div>
+                          <a href="#" className="wa-link">View Route</a>
+                          <div className="wa-url">maps.crisis.app/route/23</div>
+                          <div className="wa-time">4:39 PM ✓✓</div>
+                        </div>
+                      </div>
+                      <div className="preview-col">
+                        <div className="preview-label"><strong>FEATURE PHONE</strong> (SMS)</div>
+                        <div className="msg-bubble sms">
+                          <div><strong>ALERT:</strong> Evacuate now.<br/>Use {store.stats.recommendedSafeExit}. Walk straight 20m, turn left.<br/>Stay calm. – Police</div>
+                          <div className="sms-time">4:39 PM</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recent Activity */}
+                  <div className="glass-panel bottom-card" style={{ flex: '1.2' }}>
+                    <div className="panel-title">SYSTEM ACTIVITY LOG</div>
+                    <div className="activity-list">
+                      {store.activity.map((act, idx) => (
+                        <div key={act.id || idx} className="activity-row">
+                          <div className="activity-dot" style={act.iconColor ? {background: act.iconColor} : {}}></div>
+                          <div className="activity-info">
+                            <span className="activity-user">{act.user}</span>
+                            <span className="activity-action" dangerouslySetInnerHTML={{ __html: act.textHTML }}></span>
+                          </div>
+                          <span className="activity-time">{act.time}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <button className="view-all-btn">View All Activity</button>
+                  </div>
+
+                </div>
+              </>
+            } />
+
+            <Route path="/live-map" element={
+              <div className="content-top" style={{ height: '100%', flex: 1 }}>
+                <div className="glass-panel map-panel" style={{ flex: 1 }}>
+                  <div className="panel-title">LIVE MAP &ndash; FULL OVERVIEW</div>
+                  <div className="map-container">
+                    <LiveLeafletMap mapData={data} onGenerate={handleRegenerate} />
+                  </div>
+                </div>
+              </div>
+            } />
+
+            <Route path="/alerts" element={
+              <div className="content-bottom" style={{ height: '100%', flex: 1, display: 'flex' }}>
+                <div className="glass-panel bottom-card" style={{ flex: 1, height: '100%', overflowY: 'auto' }}>
+                  <div className="panel-title">ALL SYSTEM ALERTS</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {store.alerts.length > 0 ? store.alerts.map((alert, idx) => {
+                      const IconComp = IconMap[alert.iconName];
+                      return (
+                        <div key={alert.id || idx} className={`alert-row ${alert.type}`} style={{ padding: '12px 16px', borderRadius: '8px', background: 'rgba(255,255,255,0.03)' }}>
+                          <div className="alert-icon-box" style={{ width: 36, height: 36 }}>{IconComp ? <IconComp /> : null}</div>
+                          <div className="alert-content">
+                            <div className="alert-row-title" style={{ fontSize: '13px' }}>{alert.title}</div>
+                            <div className="alert-row-desc" style={{ fontSize: '11px' }}>{alert.desc}</div>
+                          </div>
+                          <div className="alert-row-time">{alert.time}</div>
+                        </div>
+                      );
+                    }) : <div style={{ textAlign: 'center', opacity: 0.5, marginTop: 40 }}>No active alerts</div>}
+                  </div>
+                </div>
+              </div>
+            } />
+
+            <Route path="/analytics" element={
+              <div className="content-top" style={{ flex: 1, gap: '12px', padding: '10px' }}>
+                <div className="glass-panel analytics-panel" style={{ flex: 1, height: 'fit-content' }}>
+                   <div className="panel-title">SYSTEM ANALYTICS & PERFORMANCE</div>
+                   <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+                     <div className="stat-box">
+                        <div className="stat-icon blue"><AnalyticsIcon /></div>
+                        <div className="stat-content">
+                          <span className="stat-val">{dynamicStats.responseAccuracy.toFixed(1)}%</span>
+                          <span className="stat-label">AI Accuracy</span>
+                        </div>
+                     </div>
+                     <div className="stat-box">
+                        <div className="stat-icon green"><DoorIcon /></div>
+                        <div className="stat-content">
+                          <span className="stat-val">{evacPct}%</span>
+                          <span className="stat-label">Evacuation Progress</span>
+                        </div>
+                     </div>
+                     <div className="stat-box">
+                        <div className="stat-icon yellow"><WarningTriangle /></div>
+                        <div className="stat-content">
+                          <span className="stat-val">{dynamicStats.avgResponseTime.toFixed(1)}s</span>
+                          <span className="stat-label">Avg. Response</span>
+                        </div>
                      </div>
                    </div>
-                  <div className="stat-box">
-                    <div className="stat-icon green"><ShieldCheckIcon /></div>
-                    <div className="stat-content">
-                      <span className="stat-val">{store.stats.evacuated}</span>
-                      <span className="stat-label">Evacuated</span>
-                    </div>
-                  </div>
-                  <div className="stat-box">
-                    <div className="stat-icon yellow"><AlertTriangleIcon /></div>
-                    <div className="stat-content">
-                      <span className="stat-val">{store.stats.blockedExits || store.stats.blockedRoutes}</span>
-                      <span className="stat-label">Blocked Exits</span>
-                    </div>
-                  </div>
+                   
+                   <div className="analytics-section" style={{ marginTop: 30 }}>
+                     <div className="panel-title" style={{ marginBottom: 15 }}>LIVE NETWORK LOAD</div>
+                     <div style={{ height: 8, background: 'rgba(255,255,255,0.05)', borderRadius: 4, overflow: 'hidden' }}>
+                       <div style={{ 
+                         width: `${dynamicStats.networkLoad}%`, 
+                         height: '100%', 
+                         background: 'linear-gradient(90deg, #3b82f6, #60a5fa)',
+                         boxShadow: '0 0 10px rgba(59, 130, 246, 0.5)',
+                         transition: 'width 1.5s cubic-bezier(0.4, 0, 0.2, 1)' 
+                       }}></div>
+                     </div>
+                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, marginTop: 8, opacity: 0.7 }}>
+                       <span>Nodes: 128 Active</span>
+                       <span>Current Load: {dynamicStats.networkLoad.toFixed(1)}%</span>
+                     </div>
+                   </div>
+
+                   <div className="analytics-section" style={{ marginTop: 30 }}>
+                     <div className="panel-title">SYSTEM UPTIME</div>
+                     <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-green)' }}>99.998%</div>
+                     <div style={{ fontSize: 10, opacity: 0.6 }}>Operational for 14,282 consecutive hours</div>
+                   </div>
                 </div>
               </div>
-
-              {/* Exit Distribution */}
-              <div className="analytics-section">
-                <div className="panel-title">EXIT DISTRIBUTION</div>
-                <div className="bar-container">
-                  {store.stats.exitStats?.map((es: any) => (
-                    <div className="bar-row" key={es.id}>
-                      <div className="bar-exit-label">{es.label}</div>
-                      <div className="bar-track">
-                        <div className="bar-fill" style={{width:`${es.pct}%`,background: es.blocked ? '#EF4444' : es.color}}></div>
-                      </div>
-                      <div className="bar-stats"><span>{es.count} People</span><span>{es.pct}%</span></div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* ═══ BOTTOM PANELS ═══ */}
-          <div className="content-bottom">
-
-            {/* Live Alerts */}
-            <div className="glass-panel bottom-card">
-              <div className="panel-title">LIVE ALERTS</div>
-              {store.alerts.map((alert, idx) => {
-                const IconComp = IconMap[alert.iconName];
-                return (
-                  <div key={alert.id || idx} className={`alert-row ${alert.type}`}>
-                    <div className="alert-icon-box">{IconComp ? <IconComp /> : null}</div>
-                    <div className="alert-content">
-                      <div className="alert-row-title">{alert.title}</div>
-                      <div className="alert-row-desc">{alert.desc}</div>
-                    </div>
-                    <div className="alert-row-time">{alert.time}</div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* AI Routing */}
-            <div className="glass-panel bottom-card">
-              <div className="panel-title">AI ROUTING IN PROGRESS</div>
-              <div className="routing-desc">
-                {isRegenerating ? "Analyzing new scenario..." : (isSimulating ? "Simulating evacuation..." : "Calculating safest routes for all people...")}
-              </div>
-              <div className="routing-metrics">
-                <div className="r-metric">
-                  <span className="r-val" style={{color:'var(--accent-green)'}}>{store.stats.exitStats?.length || 0}</span>
-                  <span className="r-lbl">Safe Exits</span>
-                </div>
-                <div className="r-metric">
-                  <span className="r-val">{isRegenerating ? '--' : (2.0 + Math.random() * 0.5).toFixed(1) + 's'}</span>
-                  <span className="r-lbl">Avg. Response Time</span>
-                </div>
-                <div className="r-metric">
-                  <span className="r-val">{isRegenerating ? '--' : (94 + Math.floor(Math.random() * 5)) + '%'}</span>
-                  <span className="r-lbl">Accuracy</span>
-                </div>
-              </div>
-              <div className="r-progress">
-                <div className="rp-header">
-                  <span>{isRegenerating ? "Analyzing routes..." : (isSimulating ? "Simulating..." : "Processing live data...")}</span>
-                  <span className="rp-pct">{isRegenerating ? `${progress}%` : (isSimulating ? `${Math.max(5, Math.round((store.stats.evacuated / store.stats.totalPeople) * 100))}%` : "72%")}</span>
-                </div>
-                <div className="rp-track">
-                  <div 
-                    className="rp-fill" 
-                    style={{
-                      width: isRegenerating ? `${progress}%` : (isSimulating ? `${Math.max(5, Math.round((store.stats.evacuated / store.stats.totalPeople) * 100))}%` : '72%'), 
-                      transition: 'width 0.2s ease'
-                    }}
-                  ></div>
-                </div>
-              </div>
-            </div>
-
-            {/* User Notification Preview */}
-            <div className="glass-panel bottom-card">
-              <div className="panel-title">USER NOTIFICATION PREVIEW</div>
-              <div className="preview-split">
-                <div className="preview-col">
-                  <div className="preview-label"><strong>SMARTPHONE</strong> (WhatsApp)</div>
-                  <div className="msg-bubble whatsapp">
-                    <div className="wa-title">⚠️ Emergency Alert!</div>
-                    <div>Please evacuate via <strong>{store.stats.recommendedSafeExit}</strong>.<br/>Tap to view your safe route.</div>
-                    <a href="#" className="wa-link">View Route</a>
-                    <div className="wa-url">maps.crisis.app/route/23</div>
-                    <div className="wa-time">4:39 PM ✓✓</div>
-                  </div>
-                </div>
-                <div className="preview-col">
-                  <div className="preview-label"><strong>FEATURE PHONE</strong> (SMS)</div>
-                  <div className="msg-bubble sms">
-                    <div><strong>ALERT:</strong> Evacuate now.<br/>Use {store.stats.recommendedSafeExit}. Walk straight 20m, turn left.<br/>Stay calm. – Police</div>
-                    <div className="sms-time">4:39 PM</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Recent Activity */}
-            <div className="glass-panel bottom-card" style={{ flex: '1.2' }}>
-              <div className="panel-title">SYSTEM ACTIVITY LOG</div>
-              <div className="activity-list">
-                {store.activity.map((act, idx) => (
-                  <div key={act.id || idx} className="activity-row">
-                    <div className="activity-dot" style={act.iconColor ? {background: act.iconColor} : {}}></div>
-                    <div className="activity-info">
-                      <span className="activity-user">{act.user}</span>
-                      <span className="activity-action" dangerouslySetInnerHTML={{ __html: act.textHTML }}></span>
-                    </div>
-                    <span className="activity-time">{act.time}</span>
-                  </div>
-                ))}
-              </div>
-              <button className="view-all-btn">View All Activity</button>
-            </div>
-
-          </div>
+            } />
+          </Routes>
         </div>
       </div>
     </div>
   );
 }
+
