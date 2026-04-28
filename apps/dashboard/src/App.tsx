@@ -224,7 +224,19 @@ export default function App() {
   }, []);
 
   // Simulation refs
-  type Agent = { userId: string; exitId: string; path: { x: number; y: number }[]; path_costs?: number[]; step: number; baseDelay: number; acc: number; style: string };
+  type Agent = { 
+    userId: string; 
+    exitId: string; 
+    path: { x: number; y: number }[]; 
+    path_costs?: number[]; 
+    step: number; 
+    baseDelay: number; 
+    startDelay: number;
+    isStarted: boolean;
+    revealPct: number;
+    acc: number; 
+    style: string 
+  };
   const simTimerRef = useRef<any>(null);
   const lastTickRef = useRef(0);
   const agentsRef = useRef<Agent[]>([]);
