@@ -1,0 +1,20 @@
+{
+  "projects": {
+    "default": "defences-dev",
+    "dev": "defences-dev",
+    "staging": "defences-staging",
+    "prod": "defences-prod"
+  },
+  "targets": {
+    "defences-dev": {
+      "hosting": {
+        "nav": [
+          "defences-dev-nav"
+        ],
+        "dashboard": [
+          "defences-dev-dashboard"
+        ]
+      }
+    }
+  }
+}

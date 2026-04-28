@@ -1,0 +1,36 @@
+{
+  "name": "defences",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "functions",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev:nav": "npm run dev --workspace=@defences/nav",
+    "dev:dashboard": "npm run dev --workspace=@defences/dashboard",
+    "dev:functions": "npm run serve --workspace=@defences/functions",
+    "build:all": "npm run build --workspaces",
+    "test:all": "npm run test --workspaces",
+    "lint:all": "npm run lint --workspaces",
+    "deploy:dev": "firebase deploy --project dev",
+    "seed": "ts-node scripts/seed-building.ts"
+  },
+  "devDependencies": {
+    "firebase-tools": "^13.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "firebase": "^12.11.0",
+    "firebase-admin": "^13.7.0",
+    "leaflet": "^1.9.4",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-leaflet": "^4.2.1"
+  }
+}

@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Admin check relies on checking if the user exists in the admin_users collection
+    function isAdmin() {
+      return request.auth != null && 
+        exists(/databases/$(database)/documents/admin_users/$(request.auth.uid));
+    }
+
+    match /buildings/{buildingId} {
+      allow read: if true; // Public read for web navigation clients
+      allow write: if isAdmin();
+      
+      match /floors/{floorId} {
+        allow read: if true;
+        allow write: if isAdmin();
+        
+        match /exits/{exitId} {
+          allow read: if true;
+          allow write: if isAdmin();
+        }
+      }
+      match /config/{document=**} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+    match /emergencies_log/{emergencyId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /admin_users/{userId} {
+      // Users can read own profile; Admins can read & manage all
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if isAdmin();
+    }
+
+    match /system_config/{configId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

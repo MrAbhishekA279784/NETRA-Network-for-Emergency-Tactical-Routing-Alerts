@@ -1,0 +1,33 @@
+{
+  "rules": {
+    "active_emergencies": {
+      ".read": true,
+      ".write": false
+    },
+    "locations": {
+      ".read": "auth != null", 
+      ".write": false
+    },
+    "assignments": {
+      "$emergencyId": {
+        ".read": "auth != null",
+        "$userId": {
+          ".read": true,
+          ".write": false
+        }
+      }
+    },
+    "exit_density": {
+      ".read": true,
+      ".write": false
+    },
+    "broadcasts": {
+      ".read": true,
+      ".write": false
+    },
+    "evacuation_progress": {
+      ".read": true,
+      ".write": false
+    }
+  }
+}
